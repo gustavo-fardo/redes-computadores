@@ -9,22 +9,23 @@ HEADER_SIZE = TYPE_SIZE + ID_SIZE + LEN_SIZE + CHKSUM_SIZE
 PAYLOAD_SIZE = MSG_SIZE - HEADER_SIZE
 
 def decode_msg(msg):
-    type_dict = {1: "GET", 2: "DATA", 3: "ACK", 4: "ERR", 5: "RET"}
+    type_dict = {1: "GET", 2: "DATA", 3: "END", 4: "ERR", 5: "RET"}
     type = int.from_bytes(msg[0:2], 'big')
     id = int.from_bytes(msg[2:4], 'big')
-    len = int.from_bytes(msg[4:8], 'big')
+    length = int.from_bytes(msg[4:8], 'big')
     checksum = int.from_bytes(msg[8:12], 'big')
-    data = msg[12:12+len]
+    data = msg[12:12+length]
 
-    print("Tipo:", type)
+    print("")
+    print("Tipo:", type_dict[type])
     print("Id Segm: ", id)
-    print("Tamanho: ", len)
+    print("Tamanho: ", length)
     print("Checksum: ", checksum)
-    print("Dados: ", data.decode())
+    # print("Dados: ", data.decode())
 
-    return type_dict[type], id, len, checksum, data
+    return type_dict[type], id, length, checksum, data
 
-def encode_msg(type : str, data : str, id = 0) -> bytes:
+def encode_msg(type : str, data : bytes, id = 0) -> bytes:
     if type == "GET":
         type_b = 1
         id = 0
@@ -33,16 +34,15 @@ def encode_msg(type : str, data : str, id = 0) -> bytes:
     elif type == "END":
         type_b = 3
         id = 0
-        data = ""
+        data = "".encode()
     elif type == "ERR":
         type_b = 4
         id = 0
-        data = "Arquivo nao encontrado"
+        data = "Arquivo nao encontrado".encode()
     elif type == "RET":
         type_b = 5
-        id = 0
     length = len(data)
-    data_b = data.encode()
+    data_b = data
     checksum = calc_chksum(data_b)
 
     type_b = type_b.to_bytes(TYPE_SIZE, 'big')

@@ -1,9 +1,9 @@
 import socket
-from utils import decode_msg, encode_msg, calc_chksum, MSG_SIZE
+from utils import decode_msg, encode_msg, calc_chksum, MSG_SIZE, PAYLOAD_SIZE
 
 IP = "127.0.0.1"
 PORT = 65432
-
+result_file = "resultado.txt"
 
 user_input = input("Digite sua requisição em formato: @IP_Servidor:Porta_Servidor/nome_do_arquivo.ext\n")
 user_input = user_input.split("/")
@@ -14,40 +14,67 @@ port_server = int(server_info[1])
 
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
     addr = (ip_server, port_server)
+    print("\n== CONECTANDO COM SERVIDOR ===============================")
+    print("- IP: ", IP)
+    print("- PORTA: ", PORT)
     
-    req = encode_msg("GET", file_name)
+    print("\n== REQUISITANDO ARQUIVO ==================================")
+    print("\nGET", file_name)
+    req = encode_msg("GET", file_name.encode())
     s.sendto(req, addr)
 
     file_data = {}
     loss_segm = []
     type = ""
-    incomplete_file = True
-    end_transmission = False
+    data_transmission = True
 
-    while incomplete_file:
+    print("\n== AGUARDANDO RECEBIMENTO ================================")
+    while data_transmission:
         msg, addr = s.recvfrom(MSG_SIZE) # bloqueia até receber dados
-        type, id, len, checksum, data = decode_msg(msg)
+        type, id, length, checksum, data = decode_msg(msg)
 
-        if type == "DATA" and not(end_transmission):
+        if type == "DATA":
+
+            # Simulação de perda
+            if id % 5*PAYLOAD_SIZE == 0:
+                data = data[id-5:id]
+
             test_checksum = calc_chksum(data)
-            print("\nChecksum: ", test_checksum)
+            print("\n- Checksum recalculado: ", test_checksum)
             if test_checksum != checksum:
                 loss_segm.append(id)
-                print("Segmentos perdidos: ", loss_segm)
+                print("=> Perda detectada")
             else:
                 file_data[id] = data.decode()
-                print("Recebido com integridade") 
+                print("=> Recebido com integridade") 
+
+            print("\n---")
 
         if type == "END":
-            end_transmission = True
+            data_transmission = False
 
-        if type == "DATA" and end_transmission:
-            if len(loss_segm) > 0:
-                ret_msg = encode_msg("RET", "", loss_segm[0])
+    print("\n== RECEBIMENTO FINALIZADO =================================")
+    print("- Segmentos perdidos: ", loss_segm)
+
+
+    print("\n== REQUISITANDO RETRANSMISSÃO SE NECESSÁRIO ===========")
+
+    while len(loss_segm) > 0:
+        ret_msg = encode_msg("RET", "".encode(), id=loss_segm[0])
+        s.sendto(ret_msg, addr)
+        msg, addr = s.recvfrom(MSG_SIZE) # bloqueia até receber dados
+        type, id, length, checksum, data = decode_msg(msg)
+
+        if type == "DATA":
+            if id == loss_segm[0]:
                 test_checksum = calc_chksum(data)
                 if test_checksum == checksum:
                     file_data[loss_segm[0]] = data.decode()
                     loss_segm.pop(0)
-            else:
-                incomplete_file = False
+    
+    print("\n== RETRANSMISSÃO CONCLUÍDA ================================")
             
+    with open(result_file, "w") as f:
+        for seg_id in sorted(file_data.keys()):
+            f.write(file_data[seg_id])
+        print(f"\n== ARQUIVO REMONTADO E SALVO =============================")
