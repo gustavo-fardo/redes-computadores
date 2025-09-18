@@ -9,7 +9,7 @@ HEADER_SIZE = TYPE_SIZE + ID_SIZE + LEN_SIZE + CHKSUM_SIZE
 PAYLOAD_SIZE = MSG_SIZE - HEADER_SIZE
 
 def decode_msg(msg):
-    type_dict = {1: "GET", 2: "DATA", 3: "END", 4: "ERR", 5: "RET"}
+    type_dict = {1: "GET", 2: "DATA", 3: "INFO", 4: "END", 5: "ERR", 6: "RET"}
     type = int.from_bytes(msg[0:2], 'big')
     id = int.from_bytes(msg[2:4], 'big')
     length = int.from_bytes(msg[4:8], 'big')
@@ -31,16 +31,19 @@ def encode_msg(type : str, data : bytes, id = 0) -> bytes:
         id = 0
     elif type == "DATA":
         type_b = 2
-    elif type == "END":
+    elif type == "INFO":
         type_b = 3
+        id = 0
+    elif type == "END":
+        type_b = 4
         id = 0
         data = "".encode()
     elif type == "ERR":
-        type_b = 4
+        type_b = 5
         id = 0
         data = "Arquivo nao encontrado".encode()
     elif type == "RET":
-        type_b = 5
+        type_b = 6
     length = len(data)
     data_b = data
     checksum = calc_chksum(data_b)

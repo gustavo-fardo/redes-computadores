@@ -25,7 +25,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
 
     file_data = {}
     loss_segm = []
-    type = ""
+    n_segm = 0
     data_transmission = True
 
     print("\n== AGUARDANDO RECEBIMENTO ================================")
@@ -33,10 +33,17 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         msg, addr = s.recvfrom(MSG_SIZE) # bloqueia até receber dados
         type, id, length, checksum, data = decode_msg(msg)
 
+        if type == "INFO":
+            n_segm = int(data)
+            print(f"\n- Arquivo será enviado em {n_segm} pacotes")
+
         if type == "DATA":
+            
+            if n_segm <= 0:
+                n_segm = id
 
             # Simulação de perda
-            if id % 5*PAYLOAD_SIZE == 0:
+            if id % 4*PAYLOAD_SIZE == 0:
                 data = data[id-5:id]
 
             test_checksum = calc_chksum(data)
@@ -51,6 +58,10 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             print("\n---")
 
         if type == "END":
+
+            for i in range(1, n_segm):
+                if i not in file_data:
+                    loss_segm.append(i)
             data_transmission = False
 
     print("\n== RECEBIMENTO FINALIZADO =================================")
