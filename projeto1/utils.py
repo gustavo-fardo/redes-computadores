@@ -21,7 +21,7 @@ def decode_msg(msg):
     print("Id Segm: ", id)
     print("Tamanho: ", length)
     print("Checksum: ", checksum)
-    # print("Dados: ", data.decode())
+    print("Dados: ", data.decode())
 
     return type_dict[type], id, length, checksum, data
 
@@ -41,7 +41,6 @@ def encode_msg(type : str, data : bytes, id = 0) -> bytes:
     elif type == "ERR":
         type_b = 5
         id = 0
-        data = "Arquivo nao encontrado".encode()
     elif type == "RET":
         type_b = 6
     length = len(data)
