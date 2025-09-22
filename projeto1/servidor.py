@@ -40,13 +40,14 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                         if i % PAYLOAD_SIZE == 0:
                             if not(i % 5*PAYLOAD_SIZE == 0):
                                 payload = file_data[i-PAYLOAD_SIZE:i]
-                                
+                                print(id_segm, len(payload))
                                 msg = encode_msg("DATA", payload, id_segm)
                                 s.sendto(msg, addr)
                             id_segm += 1
 
                     if i%PAYLOAD_SIZE < PAYLOAD_SIZE:
                         payload = file_data
+                        print(id_segm, len(payload))
                         msg = encode_msg("DATA", payload, id_segm)
                         s.sendto(msg, addr)
                         id_segm += 1
