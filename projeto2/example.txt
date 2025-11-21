@@ -1,0 +1,483 @@
+#!/bin/bash
+
+# ----------------------------
+# User-Friendly Bash Installer
+# ----------------------------
+
+# === Error handling ===
+set -euo pipefail
+trap 'error "❌ Error at line $LINENO, command ${BASH_COMMAND}"; exit 1' ERR
+
+# === Color Codes ===
+RED='\e[31m'
+GREEN='\e[32m'
+YELLOW='\e[33m'
+BLUE='\e[34m'
+PURPLE='\e[38;5;177m'
+NC='\e[0m' # No Color
+
+# === Visual Print Functions ===
+print_section() {
+  echo -e "\n${BLUE}====================================================${NC}"
+  echo -e "${BLUE}▶ $1${NC}"
+  echo -e "${BLUE}====================================================${NC}"
+}
+item_info() {
+  echo -e "\n${BLUE}──▶ ${NC}${YELLOW}$1${NC}\n"
+}
+
+# === Logging Functions ===
+info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+info_hl() { echo -e "${PURPLE}[INFO]${NC} $1"; }
+success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+error()   { echo -e "${RED}[ERROR]${RED} $1" >&2; }
+warn()    { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+
+# === Utilities ===
+is_installed() {
+  dpkg -s "$1" &>/dev/null
+}
+
+if [ "$EUID" -ne 0 ]; then
+  error "Please run as root (e.g., with sudo)."
+  exit 1
+fi
+
+# === Get Proxy Data ===
+read -p "Enter proxy username: " USER
+read -s -p "Enter proxy password: " PASSWORD
+echo 
+
+# === Variables ===
+PROXY_USER=$USER
+PROXY_PASS=$PASSWORD
+PROXY_ADDR="15.0.0.1:3128"
+PROXY_URL="http://${PROXY_USER}:${PROXY_PASS}@${PROXY_ADDR}/"
+PROXY_CONF="/etc/apt/apt.conf.d/proxy.conf"
+DOCKER_PROXY_CONF="/etc/systemd/system/docker.service.d/http-proxy.conf"
+OLLAMA_PROXY_CONF="/etc/systemd/system/ollama.service"
+
+# === Step 1: Proxy Setup ===
+print_section "Step 1: Configuring system-wide proxy settings..."
+
+# APT proxy config
+item_info "APT proxy config"
+if ! grep -qF "$PROXY_URL" "$PROXY_CONF" 2>/dev/null; then
+  info "Writing APT proxy config to $PROXY_CONF"
+  cat <<EOF > "$PROXY_CONF"
+Acquire::http::Proxy "$PROXY_URL";
+Acquire::https::Proxy "$PROXY_URL";
+EOF
+  success "APT proxy configured."
+else
+  success "APT proxy config already set, skipping."
+fi
+
+# pip proxy config
+item_info "pip proxy config"
+CURRENT_PIP_PROXY=$(pip config get global.proxy 2>/dev/null || echo "")
+if [ "$CURRENT_PIP_PROXY" != "$PROXY_URL" ]; then
+  info "Configuring pip proxy..."
+  apt update && apt install python3-pip -y
+  pip config set global.proxy "$PROXY_URL"
+else
+  success "pip proxy already configured, skipping."
+fi
+
+# git proxy config
+item_info "git proxy config"
+CURRENT_GIT_PROXY=$(git config --global http.proxy || echo "")
+if [ "$CURRENT_GIT_PROXY" != "$PROXY_URL" ]; then
+  info "Configuring git proxy..."
+  apt update && apt install git -y
+  git config --global http.proxy "$PROXY_URL"
+else
+  success "git proxy already configured, skipping."
+fi
+
+# wget proxy config
+item_info "wget proxy config"
+if ! grep -qF "$PROXY_URL" /etc/wgetrc 2>/dev/null; then
+  info "Configuring wget proxy..."
+  sudo tee /etc/wgetrc > /dev/null <<EOF
+use_proxy=yes
+http_proxy=$PROXY_URL
+https_proxy=$PROXY_URL
+EOF
+  success "Proxy applied for wget."
+else
+  success "wget proxy already configured, skipping."
+fi
+
+# Docker installation
+info "Installing Docker using official Docker repository..."
+# Check if Docker is already installed
+if command -v docker >/dev/null 2>&1 && docker --version >/dev/null 2>&1; then
+  success "Docker is already installed. Skipping installation."
+  docker --version
+else
+  sudo apt remove -y docker docker-engine docker.io runc || true
+  sudo apt update
+  sudo apt install -y ca-certificates curl gnupg lsb-release
+  sudo mkdir -p /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+    sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu jammy stable" | \
+    sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  sudo apt update
+  sudo apt install -y docker-ce docker-ce-cli
+  success "Docker installed successfully."
+fi
+
+# Docker proxy config
+item_info "Docker proxy config"
+mkdir -p "$(dirname "$DOCKER_PROXY_CONF")"
+if ! grep -qF "$PROXY_URL" "$DOCKER_PROXY_CONF" 2>/dev/null; then
+  info "Configuring Docker to use the proxy..."
+  cat <<EOF > "$DOCKER_PROXY_CONF"
+[Service]
+Environment="HTTP_PROXY=$PROXY_URL"
+Environment="HTTPS_PROXY=$PROXY_URL"
+Environment="NO_PROXY=localhost,127.0.0.1,::1"
+EOF
+
+  info "Reloading Docker to apply proxy settings..."
+  systemctl daemon-reexec
+  systemctl daemon-reload
+  systemctl restart docker
+
+  info "Verifying Docker environment..."
+  DOCKER_ENV=$(systemctl show --property=Environment docker)
+  echo "$DOCKER_ENV"
+  success "Docker proxy configured."
+else
+  success "Docker proxy already configured, skipping."
+fi
+
+# Proxy environment variables
+item_info "Proxy environment variables"
+for VAR in http_proxy https_proxy https_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY; do
+  if ! sudo -u "$SUDO_USER" grep -qF "export $VAR=\"$PROXY_URL\"" "/home/$SUDO_USER/.bashrc"; then
+    sudo -u "$SUDO_USER" bash -c "echo 'export $VAR=\"$PROXY_URL\"' >> /home/$SUDO_USER/.bashrc"
+    info "Exporting $VAR to /home/$SUDO_USER/.bashrc"
+  else
+    info "$VAR already exported in /home/$SUDO_USER/.bashrc, skipping."
+  fi
+done
+
+if ! sudo -u "$SUDO_USER" grep -qF 'export NO_PROXY="localhost,127.0.0.1"' "/home/$SUDO_USER/.bashrc"; then
+    sudo -u "$SUDO_USER" bash -c "echo 'export NO_PROXY=\"localhost,127.0.0.1\"' >> /home/$SUDO_USER/.bashrc"
+    info "Added export NO_PROXY to /home/$SUDO_USER/.bashrc"
+else
+    success "export NO_PROXY already present in /home/$SUDO_USER/.bashrc, skipping."
+fi
+
+source /home/$SUDO_USER/.bashrc
+
+# === Step 2: Installing Core Packages ===
+print_section "Step 2: Installing core packages..."
+CORE_PACKAGES=(htop gdebi vim git-all curl python3-pip python3-venv python3-virtualenv jq)
+TO_INSTALL=()
+
+for pkg in "${CORE_PACKAGES[@]}"; do
+  if is_installed "$pkg"; then
+    info_hl "$pkg is already installed, skipping."
+  else
+    TO_INSTALL+=("$pkg")
+  fi
+done
+
+if [ ${#TO_INSTALL[@]} -gt 0 ]; then
+  apt update -y 
+  apt install -y "${TO_INSTALL[@]}" 
+  success "Installed missing core packages: ${TO_INSTALL[*]}"
+else
+  success "All core packages are already installed."
+fi
+
+# === Step 3: Installing Applications ===
+print_section "Step 3: Installing Applications..."
+
+# VSCode
+item_info "VSCode"
+
+if is_installed code; then
+  success "VS Code is already installed."
+else
+  info "Installing VS Code..."
+  apt install -y software-properties-common apt-transport-https wget 
+  wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > packages.microsoft.gpg 
+  install -D -o root -g root -m 644 packages.microsoft.gpg /etc/apt/keyrings/packages.microsoft.gpg 
+  echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/vscode stable main" | tee /etc/apt/sources.list.d/vscode.list
+  apt update 
+  apt install -y code
+  success "VS Code installed."
+fi
+
+# Configure VS Code proxy settings as the actual user
+USER_HOME=$(eval echo "~$SUDO_USER")
+VSCODE_CONFIG="$USER_HOME/.config/Code/User/settings.json"
+
+info "Configuring VS Code proxy settings..."
+sudo -u "$SUDO_USER" mkdir -p "$(dirname "$VSCODE_CONFIG")"
+sudo -u "$SUDO_USER" bash -c "[ -f \"$VSCODE_CONFIG\" ] || echo '{}' > \"$VSCODE_CONFIG\""
+sudo -u "$SUDO_USER" jq --arg proxy "$PROXY_URL" '. + {
+  "http.proxy": $proxy,
+  "https.proxy": $proxy,
+  "http.proxyStrictSSL": false
+}' "$VSCODE_CONFIG" > "${VSCODE_CONFIG}.tmp" && sudo -u "$SUDO_USER" mv "${VSCODE_CONFIG}.tmp" "$VSCODE_CONFIG"
+
+success "VS Code proxy settings configured."
+
+
+# Discord
+item_info "Discord"
+if is_installed discord; then
+  success "Discord is already installed."
+else
+  info "Installing Discord..."
+  wget -O /tmp/discord.deb "https://discord.com/api/download?platform=linux&format=deb"
+  apt install -y /tmp/discord.deb
+  rm /tmp/discord.deb
+  success "Discord installed."
+fi
+
+# PostGres
+item_info "PostGres"
+if command -v psql > /dev/null 2>&1; then
+    success "PostgreSQL is already installed."
+else
+    info "PostgreSQL is not installed. Installing now..."
+    sudo apt update
+    sudo apt install -y postgresql postgresql-contrib
+    success "PostGres installed."
+fi
+
+# PGAdmin4
+item_info "pgAdmin4"
+PGADMIN_DIR="/home/$SUDO_USER/pgadmin4"
+VENV_NAME="pgadmin4env"
+VENV_PATH="$PGADMIN_DIR/$VENV_NAME"
+
+if [ -d "$VENV_PATH" ]; then
+  success "pgAdmin4 virtual environment already exists at $VENV_PATH, skipping installation."
+else
+  info "Installing pgAdmin4 into a virtual environment for $SUDO_USER..."
+
+  # Ensure dependencies
+  apt install -y libgmp3-dev build-essential libssl-dev libpq-dev python3-dev
+
+  # Execute user-specific setup
+  sudo -u "$SUDO_USER" bash <<EOSU
+set -e
+
+# Create pgadmin4 directory and virtualenv
+mkdir -p "$PGADMIN_DIR"
+cd "$PGADMIN_DIR"
+virtualenv "$VENV_NAME"
+
+# Activate and install pgAdmin4
+source "$VENV_NAME/bin/activate"
+pip install --proxy "$PROXY_URL" https://ftp.postgresql.org/pub/pgadmin/pgadmin4/v8.11/pip/pgadmin4-8.11-py3-none-any.whl
+
+# Detect Python version in virtualenv
+PYTHON_VERSION=\$(python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+CONFIG_PATH="$VENV_PATH/lib/python\${PYTHON_VERSION}/site-packages/pgadmin4/config_local.py"
+
+# Create pgAdmin4 config_local.py
+mkdir -p "\$(dirname "\$CONFIG_PATH")"
+cat > "\$CONFIG_PATH" <<EOF
+import os
+DATA_DIR = os.path.realpath(os.path.expanduser(u'~/.pgadmin/'))
+LOG_FILE = os.path.join(DATA_DIR, 'pgadmin4.log')
+SQLITE_PATH = os.path.join(DATA_DIR, 'pgadmin4.db')
+SESSION_DB_PATH = os.path.join(DATA_DIR, 'sessions')
+STORAGE_DIR = os.path.join(DATA_DIR, 'storage')
+SERVER_MODE = False
+AZURE_CREDENTIAL_CACHE_DIR = os.path.join(DATA_DIR, 'azurecredentialcache')
+EOF
+EOSU
+
+  success "pgAdmin4 installed at $VENV_PATH"
+  info_hl "To run pgAdmin4:"
+  echo -e "${YELLOW}  source $VENV_PATH/bin/activate && python3 $VENV_PATH/lib/python3.12/site-packages/pgAdmin4.py${NC}"
+fi
+
+# QGIS
+item_info "QGIS"
+if is_installed qgis; then
+  success "QGIS is already installed."
+else
+  info "Installing QGIS..."
+
+  # Download the QGIS GPG key and save it in /etc/apt/keyrings
+  sudo wget -O /etc/apt/keyrings/qgis-archive-keyring.gpg https://download.qgis.org/downloads/qgis-archive-keyring.gpg
+
+  # Add the QGIS repository to sources.list.d with the correct keyring
+  CODENAME=$(lsb_release -c | awk '{print $2}')
+  echo "Types: deb deb-src
+URIs: https://qgis.org/debian
+Suites: noble
+Architectures: amd64
+Components: main
+Signed-By: /etc/apt/keyrings/qgis-archive-keyring.gpg
+" | sudo tee /etc/apt/sources.list.d/qgis.sources
+
+  # Update package list and install QGIS
+  sudo apt update
+  sudo apt install -y qgis
+
+  success "QGIS installed."
+fi
+
+# MongoDB
+#item_info "MongoDB"
+#if is_installed mongod; then
+#  success "MongoDB is already installed."
+#else
+#  info "Installing MongoDB..."
+#
+#  # Install gnupg and curl if not already available
+#  sudo apt-get install -y gnupg curl
+#
+#  # Import the MongoDB public GPG key
+#  curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | \
+#    sudo gpg -o /usr/share/keyrings/mongodb-server-8.0.gpg --dearmor
+#
+#  # Add MongoDB repository for Ubuntu 24.04 (Noble)
+#  echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse" | \
+#    sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
+#
+#  # Update the package database
+#  sudo apt-get update
+#
+#  # Install MongoDB Community Server
+#  sudo apt-get install -y mongodb-org
+#
+#  success "MongoDB installed."
+#fi
+
+
+# === Step 4: CUDA Toolkit and GPU Setup ===
+print_section "Step 4: Setting up CUDA 12.9 for GPU support..."
+CUDA_VERSION="12.9"
+CUDA_DIR="/usr/local/cuda-${CUDA_VERSION}"
+CUDA_DEB_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb"
+CUDA_DEB_FILE="/tmp/cuda-keyring_1.1-1_all.deb"
+
+info "Checking for CUDA Toolkit $CUDA_VERSION..."
+if [ -d "$CUDA_DIR" ]; then
+  success "CUDA Toolkit $CUDA_VERSION is already installed at $CUDA_DIR"
+else
+  info "CUDA Toolkit $CUDA_VERSION not found. Installing..."
+  wget -O "$CUDA_DEB_FILE" "$CUDA_DEB_URL"
+  dpkg -i "$CUDA_DEB_FILE"
+  apt update
+  apt install -y cuda-toolkit-${CUDA_VERSION//./-} cuda-drivers
+  success "CUDA Toolkit $CUDA_VERSION and drivers installed."
+fi
+
+if ! grep -q "$CUDA_DIR/bin" "/home/$SUDO_USER/.bashrc"; then
+  echo "export PATH=\$PATH:$CUDA_DIR/bin" >> "/home/$SUDO_USER/.bashrc"
+  echo "export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:$CUDA_DIR/lib64" >> "/home/$SUDO_USER/.bashrc"
+  success "CUDA environment variables added to ~/.bashrc"
+else
+  success "CUDA environment variables already present in ~/.bashrc"
+fi
+
+# === Step 5: Python libraries installation
+info "Setting up Virtual Environment"
+VENV_DIR="/home/$SUDO_USER/venv"
+if [ ! -d "$VENV_DIR" ]; then
+  info "Creating Python virtual environment..."
+  sudo -u "$SUDO_USER" python3 -m virtualenv "$VENV_DIR"
+  echo "source $VENV_DIR/bin/activate" >> "/home/$SUDO_USER/.bashrc"
+  success "Virtual environment set up at $VENV_DIR"
+else
+  success "Python virtual environment already exists at $VENV_DIR, skipping creation."
+fi
+
+info "Installing Python libraries..."
+VENV_PIP="/home/$SUDO_USER/venv/bin/pip"
+LIBRARIES=("torch" "torchvision" "torchaudio")
+TO_INSTALL=()
+info "Checking libraries in virtualenv..."
+for lib in "${LIBRARIES[@]}"; do
+  if "$VENV_PIP" show "$lib" &>/dev/null; then
+    info_hl "$lib is already installed, skipping."
+  else
+    TO_INSTALL+=("$lib")
+  fi
+done
+
+if [ ${#TO_INSTALL[@]} -eq 0 ]; then
+  success "All required libraries are already installed."
+else
+  info "Installing missing libraries: ${TO_INSTALL[*]}"
+  "$VENV_PIP" install "${TO_INSTALL[@]}" --index-url https://download.pytorch.org/whl/cu128
+  success "Missing libraries installed."
+fi
+
+# === Step 6: LLM Server Setup ===
+print_section "Step 6: Setting up Ollama and OpenWebUI..."
+
+if ! docker network inspect ollama-net &>/dev/null; then
+    echo "Creating user-defined bridge network 'ollama-net'..."
+    docker network create ollama-net
+else
+    echo "Network 'ollama-net' already exists."
+fi
+
+info "Starting Ollama in Docker..."
+if ! docker ps --format '{{.Names}}' | grep -q '^ollama$'; then
+  info "Press Enter to continue with standard path or the full path on your local machine where you want to store the Ollama models (e.g., /home/user/ollama_models):"
+  read MODELS_PATH
+  if [ -z "$MODELS_PATH" ]; then
+    MODELS_PATH="~/.ollama/models"
+  fi
+  CONTAINER_MODELS_PATH="/root/.ollama"
+  docker run -d \
+  --name ollama \
+  --restart=always \
+  -p 11434:11434 \
+  -e HTTP_PROXY=$PROXY_URL \
+  -e HTTPS_PROXY=$PROXY_URL \
+  -e OLLAMA_HOST=0.0.0.0:11434 \
+  -e OLLAMA_MODELS=$CONTAINER_MODELS_PATH \
+  --network ollama-net \
+  -v "$MODELS_PATH":"$CONTAINER_MODELS_PATH" \
+  ollama/ollama
+
+  success "Ollama successfully initiated with Docker."
+else
+  success "Ollama Docker already running. Skipping startup."
+fi
+
+info "Starting OpenWebUI in Docker..."
+
+if ! docker ps -a --format '{{.Names}}' | grep -q "^open-webui$"; then
+  docker run -d -p 8080:8080 \
+  -v open-webui:/app/backend/data \
+  -e OLLAMA_BASE_URL=http://ollama:11434 \
+  -e HTTP_PROXY=$PROXY_URL \
+  -e HTTPS_PROXY=$PROXY_URL \
+  -e NO_PROXY="localhost,127.0.0.1,ollama" \
+  -e WEBUI_AUTH=false \
+  --name open-webui \
+  --restart always \
+  --network ollama-net \
+  ghcr.io/open-webui/open-webui:cuda
+  success "OpenWebUI container created and started."
+else
+  if ! sudo docker ps --format '{{.Names}}' | grep -q "^open-webui$"; then
+    sudo docker start open-webui
+    success "OpenWebUI container was stopped; started it."
+  else
+    success "OpenWebUI Docker container is already running."
+  fi
+fi
+
+info_hl "OpenWebUI is available at: ${BLUE}http://localhost:8080${NC}"
+
+echo -e "\n${GREEN}✅ Setup complete!${NC}"
