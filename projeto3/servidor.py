@@ -1,26 +1,11 @@
 import socket
 import threading
 import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MSG_SIZE = 10000
 
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        # Read the last received HTML file
-        with open("r.html", "r", encoding="utf-8") as f:
-            content = f.read()
-
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html")
-        self.end_headers()
-        self.wfile.write(content.encode("utf-8"))
-
 IP = "127.0.0.1"
 PORT = 65432
-
-# print(f"HTTP server running at http://{IP}:{PORT}")
-# HTTPServer((IP, PORT), Handler).serve_forever()
 
 def client_thread(conn, addr):
     with conn:
